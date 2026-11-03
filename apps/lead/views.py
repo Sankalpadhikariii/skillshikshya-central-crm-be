@@ -9,7 +9,9 @@ from rest_framework.decorators import action
 from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-
+from zoneinfo import ZoneInfo
+from django.db.models import Count,Q,Sum
+from django.db.models.functions import TruncDate
 from django_filters.rest_framework import DjangoFilterBackend
 
 from apps.lead.models import (
@@ -233,7 +235,7 @@ class GlobalFollowUpViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary', 'export']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
 
@@ -298,9 +300,66 @@ class GlobalCallViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve']:
+        if self.action in ['list', 'retrieve', 'summary', 'export']:
             return [IsAuthenticated()]
         return [IsAuthenticated(), IsStaffOrHasPermission()]
+
+    @action(detail=False, methods=['get'], url_path='summary')
+    def summary(self, request):
+        """Totals, calls per day (Nepal time) and top callers for the current filters."""
+        npt = ZoneInfo('Asia/Kathmandu')
+        # Same filters, search and branch scoping as the list. order_by() clears the
+        # default -call_timestamp so it can't leak into the GROUP BY below.
+        qs = self.filter_queryset(self.get_queryset()).order_by()
+
+        totals = qs.aggregate(
+            total_calls=Count('id'),
+            inbound=Count('id', filter=Q(direction='inbound')),
+            outbound=Count('id', filter=Q(direction='outbound')),
+            total_seconds=Sum('duration_seconds'),
+            connected_calls=Count('id', filter=Q(duration_seconds__gt=0)),
+        )
+        total_calls = totals['total_calls']
+        total_seconds = totals['total_seconds'] or 0
+        connected = totals['connected_calls']
+
+        by_day = (
+            qs.annotate(day=TruncDate('call_timestamp', tzinfo=npt))
+            .values('day')
+            .annotate(calls=Count('id'), seconds=Sum('duration_seconds'))
+            .order_by('day')
+        )
+        by_user = (
+            qs.values('created_by', 'created_by__name')
+            .annotate(calls=Count('id'), seconds=Sum('duration_seconds'))
+            .order_by('-calls', '-seconds')[:10]
+        )
+
+        hours, rest = divmod(total_seconds, 3600)
+        minutes, secs = divmod(rest, 60)
+        return Response({
+            'total_calls': total_calls,
+            'inbound': totals['inbound'],
+            'outbound': totals['outbound'],
+            'total_seconds': total_seconds,
+            'total_formatted': f'{hours:02d}:{minutes:02d}:{secs:02d}',
+            'avg_seconds': round(total_seconds / total_calls) if total_calls else 0,
+            'connected_calls': connected,
+            'connect_rate': round(connected / total_calls, 3) if total_calls else 0,
+            'by_day': [
+                {'date': d['day'].isoformat(), 'calls': d['calls'], 'seconds': d['seconds'] or 0}
+                for d in by_day
+            ],
+            'by_user': [
+                {
+                    'user_id': u['created_by'],
+                    'name': u['created_by__name'] or 'Unknown',
+                    'calls': u['calls'],
+                    'seconds': u['seconds'] or 0,
+                }
+                for u in by_user
+            ],
+        })
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
