@@ -552,3 +552,43 @@ class GlobalCallExportScopingTests(APITestCase):
         _, _, only_y = read_export(self.client, f'{EXPORT_URL}?branch_id={self.branch_y.id}')
         self.assertEqual(len(everything) - 1, 3)
         self.assertEqual(sorted(r[8] for r in only_y[1:]), ['200', '300'])
+
+
+class GlobalCallNoBranchUserTests(APITestCase):
+    """US-6 write-up: what a non-staff user with NO branch sees today.
+
+    BranchFilterBackend only filters when the user has a branch, so a branch-less
+    non-staff user is not filtered at all and sees every branch. These tests pin
+    that current behaviour on purpose. The proposed fix (return queryset.none()
+    for such users) is described in the PR write-up and is not part of this change.
+    """
+
+    def setUp(self):
+        self.branch_x = Branch.objects.create(name='Biratnagar', code='BRT')
+        self.branch_y = Branch.objects.create(name='Dharan', code='DHR')
+        self.no_branch_user = User.objects.create_user(
+            email='nb@test.com', name='No Branch', password='pass',
+        )
+        self.lead = Lead.objects.create(full_name='Call Person', phone='9811111111')
+        for seconds, branch in [(100, self.branch_x), (200, self.branch_y), (300, None)]:
+            LeadCall.objects.create(
+                lead=self.lead, call_timestamp=utc(2026, 10, 28, 10, 0),
+                direction='outbound', caller='x', phone_number='9811111111',
+                duration_seconds=seconds, created_by=self.no_branch_user, branch=branch,
+            )
+        self.client.force_authenticate(self.no_branch_user)
+
+    def test_list_is_not_filtered(self):
+        response = self.client.get('/api/calls/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['count'], 3)
+
+    def test_summary_is_not_filtered(self):
+        response = self.client.get('/api/calls/summary/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['total_calls'], 3)
+
+    def test_export_is_not_filtered(self):
+        response, _, rows = read_export(self.client)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(rows) - 1, 3)
