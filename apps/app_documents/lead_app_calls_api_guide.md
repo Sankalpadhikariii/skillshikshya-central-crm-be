@@ -9,6 +9,8 @@ All CRUD endpoints are nested under a specific lead. A flat cross-lead call log 
 | Method | Endpoint | Description | Access |
 |--------|----------|-------------|--------|
 | GET | `/api/calls/` | **All calls across leads** (paginated, newest first) | Authenticated |
+| GET | `/api/calls/summary/` | **Call totals**, calls per day and top callers for the current filters | Authenticated |
+| GET | `/api/calls/export/` | **CSV download** of every call matching the current filters | Authenticated |
 | GET | `/api/leads/{lead_id}/calls/` | List calls for one lead (paginated) | Authenticated |
 | POST | `/api/leads/{lead_id}/calls/` | Add a call (consumes call minutes) | Staff or `lead.add_leadcall` permission |
 | GET | `/api/leads/{lead_id}/calls/{id}/` | Get call detail | Authenticated |
@@ -45,6 +47,7 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
     "caller": "Shikhar",
     "phone_number": "9877700111",
     "duration_seconds": 270,
+    "duration_formatted": "04:30",
     "outcome": "Interested",
     "notes": "",
     "branch": 1,
@@ -54,6 +57,68 @@ Read-only list of every call across all leads, **branch-scoped** (staff see all 
 ```
 
 The `lead` field is auto-set from the URL. `created_by` is auto-set to the requesting user.
+
+## Call Summary — `GET /api/calls/summary/`
+
+Totals for the call log, built for the Calls page header cards and charts. It takes **the same filters, `search` and branch scoping as `GET /api/calls/`** (staff see all / `?branch_id=X`; non-staff locked to their branch), so for the same query string `total_calls` equals the list's `count`. `page`, `page_size` and `ordering` are ignored. The response is one unpaginated object and costs a fixed three database queries however many calls match.
+
+**Example response:**
+```json
+{
+    "total_calls": 128,
+    "inbound": 40,
+    "outbound": 88,
+    "total_seconds": 30215,
+    "total_formatted": "08:23:35",
+    "avg_seconds": 236,
+    "connected_calls": 110,
+    "connect_rate": 0.859,
+    "by_day": [{ "date": "2026-10-28", "calls": 14, "seconds": 3310 }],
+    "by_user": [{ "user_id": 9, "name": "Shikhar", "calls": 40, "seconds": 9800 }]
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `total_calls` / `inbound` / `outbound` | Number of matching calls and the split by direction |
+| `total_seconds` / `total_formatted` | Talk time in seconds and as `HH:MM:SS` |
+| `avg_seconds` | Average duration in whole seconds (`0` when there are no calls) |
+| `connected_calls` | Calls that lasted more than 0 seconds |
+| `connect_rate` | `connected_calls / total_calls`, between `0` and `1`, rounded to 3 decimals (`0` when there are no calls) |
+| `by_day` | Calls and seconds per day, oldest first. **Days are counted in Nepal time (`Asia/Kathmandu`)**: a call at 20:00 UTC on Oct 28 is counted under `2026-10-29` |
+| `by_user` | The 10 callers with the most calls (ties broken by talk time). Calls with no `created_by` appear as `user_id: null`, `name: "Unknown"` |
+
+With no matching calls every number is `0` and `by_day` and `by_user` are empty lists.
+
+## Call Export — `GET /api/calls/export/`
+
+Downloads every call matching the current filters as a CSV, **across all pages**. It takes the same filters, `search`, `ordering` and branch scoping as `GET /api/calls/`; `page` and `page_size` are ignored. Rows are newest first unless `ordering` says otherwise. The file is streamed, and the number of database queries does not grow with the number of rows.
+
+**Response headers:** `Content-Type: text/csv; charset=utf-8` and `Content-Disposition: attachment; filename="calls-YYYY-MM-DD.csv"` (the date is today in Nepal time).
+
+**Columns, in this order:**
+
+| Column | Content |
+|--------|---------|
+| `Date & time (NPT)` | `YYYY-MM-DD HH:MM:SS` in Nepal time |
+| `Direction` | `Inbound` or `Outbound` |
+| `Lead` | Lead name |
+| `Reference` | Lead reference number, e.g. `LD-2026-000086` |
+| `Phone` | Phone number |
+| `Caller` | Caller name as stored on the call |
+| `Logged by` | Name of the user who logged the call (empty if none) |
+| `Duration (MM:SS)` | e.g. `04:19` |
+| `Seconds` | Duration in seconds |
+| `Outcome` | Call outcome |
+| `Notes` | Call notes |
+| `Recording` | Recording URL |
+
+**Spreadsheet behaviour:**
+
+- The file starts with a UTF-8 byte order mark so Excel shows Nepali (Devanagari) text correctly.
+- **Formula safety:** any text cell that starts with `=`, `+`, `-` or `@` (or a tab or carriage return) gets a leading `'`, so a note such as `=HYPERLINK(...)` is shown as plain text and never runs. The one exception is a phone number written in plain international form such as `+9779812345678`, which is left as it is.
+
+**Calling it from the frontend:** fetch it with axios and `responseType: "blob"`, then save it with an object URL. A plain link skips the login-cookie refresh in `src/lib/api.ts`.
 
 ## Call Minutes Deduction
 
